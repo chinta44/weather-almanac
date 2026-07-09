@@ -350,36 +350,42 @@ function renderResult(records, loading){
 
   let chartHtml = "";
   if (available.length > 0){
-    const w = 280, h = 180, padL = 30, padB = 20, padT = 10;
+    const w = 280, h = 180, padL = 34, padR = 10, padB = 22, padT = 14;
     const allVals = available.flatMap(r => [r.max, r.min]);
     const yMax = Math.ceil(Math.max(...allVals)/5)*5 + 2;
     const yMin = Math.floor(Math.min(...allVals)/5)*5 - 2;
-    const chartW = w - padL - 10, chartH = h - padB - padT;
-    const groupW = chartW / records.length;
-    const barW = groupW / 4;
+    const chartW = w - padL - padR, chartH = h - padB - padT;
+    const n = records.length;
+    const xScale = (i) => padL + (n === 1 ? chartW/2 : (i/(n-1)) * chartW);
     const yScale = (v) => padT + chartH - ((v - yMin) / (yMax - yMin)) * chartH;
 
-    let bars = "";
     let gridLines = "";
     for (let gv = Math.ceil(yMin/10)*10; gv <= yMax; gv += 10){
       const y = yScale(gv);
-      gridLines += `<line x1="${padL}" y1="${y}" x2="${w-10}" y2="${y}" stroke="${LINE}" stroke-dasharray="2 4" />`;
+      gridLines += `<line x1="${padL}" y1="${y}" x2="${w-padR}" y2="${y}" stroke="${LINE}" stroke-dasharray="2 4" />`;
       gridLines += `<text x="${padL-6}" y="${y+3}" text-anchor="end" fill="${MUTED}" font-size="9" font-family="Inter">${gv}°</text>`;
     }
-    records.forEach((r, i) => {
-      const gx = padL + i*groupW;
-      if (r.available){
-        const maxY = yScale(r.max), meanY = yScale(r.mean), minY = yScale(r.min);
-        const base = yScale(yMin);
-        bars += `<rect x="${gx+barW*0.3}" y="${maxY}" width="${barW*0.8}" height="${base-maxY}" fill="${EMBER}" rx="2"/>`;
-        bars += `<rect x="${gx+barW*1.3}" y="${meanY}" width="${barW*0.8}" height="${base-meanY}" fill="${TAN}" rx="2"/>`;
-        bars += `<rect x="${gx+barW*2.3}" y="${minY}" width="${barW*0.8}" height="${base-minY}" fill="${FROST}" rx="2"/>`;
-      }
-      bars += `<text x="${gx+groupW/2}" y="${h-4}" text-anchor="middle" fill="${MUTED}" font-size="10" font-family="Inter">${r.year}</text>`;
+
+    function buildLine(key, color){
+      const pts = [];
+      records.forEach((r,i) => { if (r.available) pts.push([xScale(i), yScale(r[key])]); });
+      if (pts.length === 0) return "";
+      const path = pts.map((p,i) => (i===0?"M":"L") + p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ");
+      let dots = "";
+      pts.forEach(p => { dots += `<circle cx="${p[0]}" cy="${p[1]}" r="3" fill="${color}" />`; });
+      return `<path d="${path}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />${dots}`;
+    }
+
+    const lines = buildLine("max", EMBER) + buildLine("mean", TAN) + buildLine("min", FROST);
+
+    let xLabels = "";
+    records.forEach((r,i) => {
+      xLabels += `<text x="${xScale(i)}" y="${h-4}" text-anchor="middle" fill="${MUTED}" font-size="10" font-family="Inter">${r.year}</text>`;
     });
+
     chartHtml = `
       <div class="chart-wrap">
-        <svg width="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMidYMid meet">${gridLines}${bars}</svg>
+        <svg width="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMidYMid meet">${gridLines}${lines}${xLabels}</svg>
         <div class="bar-legend">
           <span><i style="background:${EMBER}"></i>最高</span>
           <span><i style="background:${TAN}"></i>平均</span>
