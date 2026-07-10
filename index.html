@@ -89,6 +89,12 @@
   .result-header { margin-bottom: 12px; }
   .result-date { font-family: 'Fraunces', serif; font-size: 20px; font-weight: 600; }
   .result-sub { color: var(--muted); font-size: 12.5px; margin-left: 6px; }
+  .tab-row { display: flex; gap: 6px; margin-bottom: 16px; }
+  .tab-btn {
+    flex: 1; background: var(--surface-alt); border: 1px solid var(--line); color: var(--muted);
+    border-radius: 7px; padding: 7px 4px; font-size: 12.5px; cursor: pointer; font-family: 'Inter', sans-serif;
+  }
+  .tab-btn.active { background: var(--ember); border-color: var(--ember); color: var(--ink); font-weight: 600; }
   .legend { display: flex; flex-direction: column; gap: 8px; }
   .legend-row {
     display: flex; align-items: center; gap: 10px; font-size: 13px;
@@ -113,7 +119,7 @@
 <div class="wrap">
   <div class="eyebrow">WEATHER ALMANAC</div>
   <h1>気温くらべ帳</h1>
-  <p class="sub">日付をひとつ選ぶと、今年から過去4年分、同じ日の気温を並べて見せます。</p>
+  <p class="sub">日付をひとつ選ぶと、今年から過去4年分の気温を「日ごと・週平均・月平均」で比較できます。</p>
 
   <div class="loc-row">
     <button class="primary-btn" id="geoBtn">📍 現在地を使う</button>
@@ -170,6 +176,8 @@ let viewMonth = today.getMonth();
 let selectedDay = null;
 let userLoc = null;
 let placeName = "";
+let currentTab = "day";
+let dataCache = {};
 
 function pad(n){ return String(n).padStart(2,"0"); }
 function dateStr(y,m,d){ return `${y}-${pad(m+1)}-${pad(d)}`; }
@@ -218,6 +226,50 @@ async function getYearRecord(year, month, day, lat, lon){
   }
 }
 
+async function getRangeRecord(year, startStr, endStr, lat, lon){
+  const endDate = new Date(endStr + "T00:00:00");
+  const diffDays = Math.round((endDate - today) / 86400000);
+  const params = "temperature_2m_max,temperature_2m_min,temperature_2m_mean";
+  const base = diffDays > -6
+    ? "https://api.open-meteo.com/v1/forecast"
+    : "https://archive-api.open-meteo.com/v1/archive";
+  try {
+    const url = `${base}?latitude=${lat}&longitude=${lon}&start_date=${startStr}&end_date=${endStr}&daily=${params}&timezone=auto`;
+    const data = await fetchDaily(url);
+    const maxes = (data?.daily?.temperature_2m_max || []).filter(v => v != null);
+    const mins = (data?.daily?.temperature_2m_min || []).filter(v => v != null);
+    const means = (data?.daily?.temperature_2m_mean || []).filter(v => v != null);
+    if (!maxes.length || !mins.length || !means.length) {
+      return { year, available: false, reason: diffDays > 16 ? "future" : "error" };
+    }
+    const max = Math.max(...maxes);
+    const min = Math.min(...mins);
+    const mean = means.reduce((a, b) => a + b, 0) / means.length;
+    return { year, available: true, max, min, mean };
+  } catch (e) {
+    return { year, available: false, reason: "error" };
+  }
+}
+
+function weekRangeFor(year, month, day){
+  const d = new Date(year, month, day);
+  const dow = d.getDay();
+  const start = new Date(d); start.setDate(d.getDate() - dow);
+  const end = new Date(d); end.setDate(d.getDate() + (6 - dow));
+  return {
+    start: dateStr(start.getFullYear(), start.getMonth(), start.getDate()),
+    end: dateStr(end.getFullYear(), end.getMonth(), end.getDate()),
+    startObj: start, endObj: end,
+  };
+}
+
+function monthRangeFor(year, month){
+  return {
+    start: dateStr(year, month, 1),
+    end: dateStr(year, month, daysInMonth(year, month)),
+  };
+}
+
 async function reverseGeocode(lat, lon){
   try {
     const res = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=ja`);
@@ -247,7 +299,9 @@ document.getElementById("geoBtn").addEventListener("click", () => {
       placeName = "現在地";
       renderLocStatus();
       reverseGeocode(userLoc.lat, userLoc.lon);
-      maybeFetch();
+      dataCache = {};
+      renderResult();
+      ensureTabData(currentTab);
     },
     (err) => {
       statusEl.textContent = "取得できませんでした（" + (err.message || "許可されていません") + "）。下の都市から選ぶか、座標を直接指定してください。";
@@ -267,7 +321,9 @@ PRESET_CITIES.forEach(c => {
     [...cityRow.children].forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
     renderLocStatus();
-    maybeFetch();
+    dataCache = {};
+    renderResult();
+    ensureTabData(currentTab);
   });
   cityRow.appendChild(btn);
 });
@@ -279,7 +335,9 @@ document.getElementById("manualBtn").addEventListener("click", () => {
   userLoc = { lat, lon };
   placeName = `緯度${lat.toFixed(2)}, 経度${lon.toFixed(2)}`;
   renderLocStatus();
-  maybeFetch();
+  dataCache = {};
+  renderResult();
+  ensureTabData(currentTab);
 });
 
 function renderCalendar(){
@@ -309,29 +367,34 @@ function renderCalendar(){
     btn.textContent = d;
     if (d === today.getDate() && viewMonth === today.getMonth()) btn.classList.add("today");
     if (d === selectedDay) btn.classList.add("selected");
-    btn.addEventListener("click", () => { selectedDay = d; renderCalendar(); maybeFetch(); });
+    btn.addEventListener("click", () => { selectedDay = d; dataCache = {}; renderCalendar(); renderResult(); ensureTabData(currentTab); });
     dayGrid.appendChild(btn);
   }
 }
-document.getElementById("prevMonth").addEventListener("click", () => { if(viewMonth>0){ viewMonth--; selectedDay=null; renderCalendar(); renderResult(); } });
-document.getElementById("nextMonth").addEventListener("click", () => { if(viewMonth<11){ viewMonth++; selectedDay=null; renderCalendar(); renderResult(); } });
+document.getElementById("prevMonth").addEventListener("click", () => { if(viewMonth>0){ viewMonth--; selectedDay=null; dataCache={}; renderCalendar(); renderResult(); } });
+document.getElementById("nextMonth").addEventListener("click", () => { if(viewMonth<11){ viewMonth++; selectedDay=null; dataCache={}; renderCalendar(); renderResult(); } });
 
-function renderResult(records, loading){
-  const card = document.getElementById("resultCard");
-  if (selectedDay == null){
-    card.innerHTML = `<div class="placeholder"><div class="placeholder-ring"></div><p class="placeholder-text">左のカレンダーから日付を選ぶと、<br>その日の気温の年輪が育ちます。</p></div>`;
-    return;
-  }
-  if (!userLoc){
-    card.innerHTML = `<div class="placeholder"><p class="placeholder-text">地点がまだ設定されていません。<br>上の「📍 現在地を使う」か、都市ボタンを押してください。</p></div>`;
-    return;
-  }
-  if (loading){
-    card.innerHTML = `<div class="placeholder"><p class="placeholder-text">${MONTHS_JA[viewMonth]}${selectedDay}日の気温を集めています…</p></div>`;
-    return;
-  }
-  if (!records) return;
+function tabBarHtml(){
+  const tabs = [["day","日ごと"], ["week","週平均"], ["month","月平均"]];
+  const btns = tabs.map(([id,label]) =>
+    `<button class="tab-btn${currentTab===id?" active":""}" onclick="selectTab('${id}')">${label}</button>`
+  ).join("");
+  return `<div class="tab-row">${btns}</div>`;
+}
 
+function periodLabel(){
+  if (currentTab === "day") {
+    return { title: `${MONTHS_JA[viewMonth]}${selectedDay}日`, sub: `の気温くらべ · ${placeName}` };
+  }
+  if (currentTab === "week") {
+    const { startObj, endObj } = weekRangeFor(currentYear, viewMonth, selectedDay);
+    const fmt = (d) => `${d.getMonth()+1}/${d.getDate()}`;
+    return { title: `${fmt(startObj)}〜${fmt(endObj)}`, sub: `の週平均 · ${placeName}` };
+  }
+  return { title: `${MONTHS_JA[viewMonth]}`, sub: `の月平均 · ${placeName}` };
+}
+
+function buildResultBody(records){
   const available = records.filter(r => r.available);
   const means = available.map(r => r.mean);
   const dMin = means.length ? Math.min(...means) - 3 : -5;
@@ -344,7 +407,7 @@ function renderResult(records, loading){
     const label = r.year + (r.year===currentYear ? "（今年）" : "");
     const valsOrMsg = r.available
       ? `<span class="legend-vals">最高 ${r.max.toFixed(1)}° / 平均 ${r.mean.toFixed(1)}° / 最低 ${r.min.toFixed(1)}°</span>`
-      : `<span class="legend-unavail">${r.reason==="future" ? "未来の日付です" : "データ取得不可"}</span>`;
+      : `<span class="legend-unavail">${r.reason==="future" ? "未来の期間です" : "データ取得不可"}</span>`;
     legendHtml += `<div class="legend-row"><span class="legend-swatch" style="background:${swatch}"></span><span class="legend-year">${label}</span>${valsOrMsg}</div>`;
   });
 
@@ -394,29 +457,67 @@ function renderResult(records, loading){
       </div>`;
   }
 
-  document.getElementById("resultCard").innerHTML = `
+  const { title, sub } = periodLabel();
+  return `
     <div class="result-header">
-      <span class="result-date">${MONTHS_JA[viewMonth]}${selectedDay}日</span>
-      <span class="result-sub">の気温くらべ · ${placeName}</span>
+      <span class="result-date">${title}</span>
+      <span class="result-sub">${sub}</span>
     </div>
     <div class="legend">${legendHtml}</div>
     ${chartHtml}
   `;
 }
 
-let fetchToken = 0;
-async function maybeFetch(){
-  if (selectedDay == null || !userLoc){ renderResult(null, false); return; }
-  const myToken = ++fetchToken;
-  renderResult(null, true);
+function renderResult(){
+  const card = document.getElementById("resultCard");
+  if (selectedDay == null){
+    card.innerHTML = `<div class="placeholder"><div class="placeholder-ring"></div><p class="placeholder-text">左のカレンダーから日付を選ぶと、<br>気温の比較が表示されます。</p></div>`;
+    return;
+  }
+  if (!userLoc){
+    card.innerHTML = `<div class="placeholder"><p class="placeholder-text">地点がまだ設定されていません。<br>上の「📍 現在地を使う」か、都市ボタンを押してください。</p></div>`;
+    return;
+  }
+  const cached = dataCache[currentTab];
+  if (cached === undefined || cached === "loading"){
+    card.innerHTML = tabBarHtml() + `<div class="placeholder"><p class="placeholder-text">気温を集めています…</p></div>`;
+    return;
+  }
+  card.innerHTML = tabBarHtml() + buildResultBody(cached);
+}
+
+window.selectTab = function(tab){
+  if (tab === currentTab) return;
+  currentTab = tab;
+  renderResult();
+  ensureTabData(tab);
+};
+
+async function ensureTabData(tab){
+  if (dataCache[tab] !== undefined) return;
+  dataCache[tab] = "loading";
+  if (tab === currentTab) renderResult();
   const years = [4,3,2,1,0].map(back => currentYear - back);
-  const results = await Promise.all(years.map(y => getYearRecord(y, viewMonth, selectedDay, userLoc.lat, userLoc.lon)));
-  if (myToken !== fetchToken) return;
-  renderResult(results, false);
+  let results;
+  if (tab === "day") {
+    results = await Promise.all(years.map(y => getYearRecord(y, viewMonth, selectedDay, userLoc.lat, userLoc.lon)));
+  } else if (tab === "week") {
+    results = await Promise.all(years.map(y => {
+      const { start, end } = weekRangeFor(y, viewMonth, selectedDay);
+      return getRangeRecord(y, start, end, userLoc.lat, userLoc.lon);
+    }));
+  } else {
+    results = await Promise.all(years.map(y => {
+      const { start, end } = monthRangeFor(y, viewMonth);
+      return getRangeRecord(y, start, end, userLoc.lat, userLoc.lon);
+    }));
+  }
+  dataCache[tab] = results;
+  if (tab === currentTab) renderResult();
 }
 
 renderCalendar();
-renderResult(null, false);
+renderResult();
 renderLocStatus();
 </script>
 </body>
