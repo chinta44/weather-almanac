@@ -58,6 +58,13 @@
     border-radius: 6px; padding: 6px 10px; font-size: 13px; width: 140px; font-family: 'IBM Plex Mono', monospace;
   }
   .hint { font-size: 12px; color: #5C6674; margin: 6px 0 0; }
+  .years-row { display: flex; align-items: center; gap: 10px; margin: 4px 0 18px; }
+  .years-label { font-size: 12.5px; color: var(--muted); }
+  .years-btn {
+    background: var(--surface-alt); border: 1px solid var(--line); color: var(--paper);
+    border-radius: 6px; padding: 5px 12px; font-size: 12.5px; cursor: pointer; font-family: 'Inter', sans-serif;
+  }
+  .years-btn.active { background: var(--ember); border-color: var(--ember); color: var(--ink); font-weight: 600; }
 
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; margin-top: 20px; }
   @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
@@ -96,14 +103,18 @@
   }
   .tab-btn.active { background: var(--ember); border-color: var(--ember); color: var(--ink); font-weight: 600; }
   .legend { display: flex; flex-direction: column; gap: 8px; }
+  .baseline-note { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
   .legend-row {
-    display: flex; align-items: center; gap: 10px; font-size: 13px;
+    display: flex; flex-direction: column; gap: 4px; font-size: 13px;
     background: var(--surface-alt); border: 1px solid var(--line); border-radius: 8px;
     padding: 10px 12px;
   }
+  .legend-row-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .legend-swatch { width: 14px; height: 14px; border-radius: 4px; flex-shrink: 0; }
   .legend-year { font-family: 'IBM Plex Mono', monospace; width: 90px; flex-shrink: 0; font-weight: 500; }
-  .legend-vals { color: var(--muted); }
+  .legend-vals { color: var(--muted); flex: 1; }
+  .legend-diff { font-family: 'IBM Plex Mono', monospace; font-size: 12px; font-weight: 600; flex-shrink: 0; }
+  .legend-sub { color: #6E7889; font-size: 11.5px; padding-left: 24px; }
   .legend-unavail { color: #6B5648; font-style: italic; }
 
   .chart-wrap { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
@@ -136,6 +147,12 @@
   </details>
   <p class="hint" id="locHint">※ 上のいずれかで地点を決めると、日付を選んだときに気温が表示されます。</p>
 
+  <div class="years-row">
+    <span class="years-label">比較する年数:</span>
+    <button class="years-btn active" id="years5">過去5年</button>
+    <button class="years-btn" id="years10">過去10年</button>
+  </div>
+
   <div class="grid">
     <div class="card">
       <div class="cal-header">
@@ -151,7 +168,7 @@
     <div class="card" id="resultCard">
       <div class="placeholder">
         <div class="placeholder-ring"></div>
-        <p class="placeholder-text">左のカレンダーから日付を選ぶと、<br>その日の気温の年輪が育ちます。</p>
+        <p class="placeholder-text">左のカレンダーから日付を選ぶと、<br>気温の比較が表示されます。</p>
       </div>
     </div>
   </div>
@@ -178,6 +195,7 @@ let userLoc = null;
 let placeName = "";
 let currentTab = "day";
 let dataCache = {};
+let yearsBack = 5;
 
 function pad(n){ return String(n).padStart(2,"0"); }
 function dateStr(y,m,d){ return `${y}-${pad(m+1)}-${pad(d)}`; }
@@ -202,7 +220,7 @@ async function getYearRecord(year, month, day, lat, lon){
   const ds = dateStr(year, month, day);
   const target = new Date(ds + "T00:00:00");
   const diffDays = Math.round((target - today) / 86400000);
-  const params = "temperature_2m_max,temperature_2m_min,temperature_2m_mean";
+  const params = "temperature_2m_max,temperature_2m_min,temperature_2m_mean,precipitation_sum,relative_humidity_2m_mean";
   try {
     if (diffDays > 16) return { year, available:false, reason:"future" };
     if (diffDays > -6) {
@@ -211,16 +229,20 @@ async function getYearRecord(year, month, day, lat, lon){
       const max = data?.daily?.temperature_2m_max?.[0];
       const min = data?.daily?.temperature_2m_min?.[0];
       const mean = data?.daily?.temperature_2m_mean?.[0];
+      const precip = data?.daily?.precipitation_sum?.[0];
+      const humidity = data?.daily?.relative_humidity_2m_mean?.[0];
       if (max == null) throw new Error("no data");
-      return { year, available:true, max, min, mean };
+      return { year, available:true, max, min, mean, precip, humidity };
     }
     const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lon}&start_date=${ds}&end_date=${ds}&daily=${params}&timezone=auto`;
     const data = await fetchDaily(url);
     const max = data?.daily?.temperature_2m_max?.[0];
     const min = data?.daily?.temperature_2m_min?.[0];
     const mean = data?.daily?.temperature_2m_mean?.[0];
+    const precip = data?.daily?.precipitation_sum?.[0];
+    const humidity = data?.daily?.relative_humidity_2m_mean?.[0];
     if (max == null) throw new Error("no data");
-    return { year, available:true, max, min, mean };
+    return { year, available:true, max, min, mean, precip, humidity };
   } catch(e){
     return { year, available:false, reason:"error", detail: String(e.message||e) };
   }
@@ -229,7 +251,7 @@ async function getYearRecord(year, month, day, lat, lon){
 async function getRangeRecord(year, startStr, endStr, lat, lon){
   const endDate = new Date(endStr + "T00:00:00");
   const diffDays = Math.round((endDate - today) / 86400000);
-  const params = "temperature_2m_max,temperature_2m_min,temperature_2m_mean";
+  const params = "temperature_2m_max,temperature_2m_min,temperature_2m_mean,precipitation_sum,relative_humidity_2m_mean";
   const base = diffDays > -6
     ? "https://api.open-meteo.com/v1/forecast"
     : "https://archive-api.open-meteo.com/v1/archive";
@@ -239,13 +261,17 @@ async function getRangeRecord(year, startStr, endStr, lat, lon){
     const maxes = (data?.daily?.temperature_2m_max || []).filter(v => v != null);
     const mins = (data?.daily?.temperature_2m_min || []).filter(v => v != null);
     const means = (data?.daily?.temperature_2m_mean || []).filter(v => v != null);
+    const precips = (data?.daily?.precipitation_sum || []).filter(v => v != null);
+    const humids = (data?.daily?.relative_humidity_2m_mean || []).filter(v => v != null);
     if (!maxes.length || !mins.length || !means.length) {
       return { year, available: false, reason: diffDays > 16 ? "future" : "error" };
     }
     const max = Math.max(...maxes);
     const min = Math.min(...mins);
     const mean = means.reduce((a, b) => a + b, 0) / means.length;
-    return { year, available: true, max, min, mean };
+    const precip = precips.length ? precips.reduce((a,b) => a+b, 0) : null;
+    const humidity = humids.length ? humids.reduce((a,b) => a+b, 0) / humids.length : null;
+    return { year, available: true, max, min, mean, precip, humidity };
   } catch (e) {
     return { year, available: false, reason: "error" };
   }
@@ -340,6 +366,18 @@ document.getElementById("manualBtn").addEventListener("click", () => {
   ensureTabData(currentTab);
 });
 
+function setYearsBack(n){
+  if (n === yearsBack) return;
+  yearsBack = n;
+  document.getElementById("years5").classList.toggle("active", n === 5);
+  document.getElementById("years10").classList.toggle("active", n === 10);
+  dataCache = {};
+  renderResult();
+  ensureTabData(currentTab);
+}
+document.getElementById("years5").addEventListener("click", () => setYearsBack(5));
+document.getElementById("years10").addEventListener("click", () => setYearsBack(10));
+
 function renderCalendar(){
   document.getElementById("calTitle").textContent = `${currentYear}年 ${MONTHS_JA[viewMonth]}`;
   document.getElementById("prevMonth").disabled = viewMonth === 0;
@@ -399,17 +437,43 @@ function buildResultBody(records){
   const means = available.map(r => r.mean);
   const dMin = means.length ? Math.min(...means) - 3 : -5;
   const dMax = means.length ? Math.max(...means) + 3 : 30;
+  const baseline = means.length ? means.reduce((a,b)=>a+b,0) / means.length : null;
 
   const sortedDesc = [...records].sort((a,b) => b.year - a.year);
   let legendHtml = "";
   sortedDesc.forEach(r => {
     const swatch = r.available ? tempToColor(r.mean, dMin, dMax) : "#2C3441";
     const label = r.year + (r.year===currentYear ? "（今年）" : "");
-    const valsOrMsg = r.available
-      ? `<span class="legend-vals">最高 ${r.max.toFixed(1)}° / 平均 ${r.mean.toFixed(1)}° / 最低 ${r.min.toFixed(1)}°</span>`
-      : `<span class="legend-unavail">${r.reason==="future" ? "未来の期間です" : "データ取得不可"}</span>`;
-    legendHtml += `<div class="legend-row"><span class="legend-swatch" style="background:${swatch}"></span><span class="legend-year">${label}</span>${valsOrMsg}</div>`;
+    if (r.available){
+      const diff = baseline != null ? r.mean - baseline : null;
+      const diffText = diff == null ? "" : (diff >= 0 ? `+${diff.toFixed(1)}°` : `${diff.toFixed(1)}°`);
+      const diffColor = diff == null ? MUTED : (diff >= 0.05 ? EMBER : (diff <= -0.05 ? FROST : MUTED));
+      const precipText = r.precip != null ? `降水量 ${r.precip.toFixed(0)}mm` : "降水量 データなし";
+      const humidText = r.humidity != null ? `湿度 ${r.humidity.toFixed(0)}%` : "湿度 データなし";
+      legendHtml += `
+        <div class="legend-row">
+          <div class="legend-row-main">
+            <span class="legend-swatch" style="background:${swatch}"></span>
+            <span class="legend-year">${label}</span>
+            <span class="legend-vals">最高 ${r.max.toFixed(1)}° / 平均 ${r.mean.toFixed(1)}° / 最低 ${r.min.toFixed(1)}°</span>
+            <span class="legend-diff" style="color:${diffColor}">平年比 ${diffText}</span>
+          </div>
+          <div class="legend-sub">${precipText} ・ ${humidText}</div>
+        </div>`;
+    } else {
+      legendHtml += `
+        <div class="legend-row">
+          <div class="legend-row-main">
+            <span class="legend-swatch" style="background:${swatch}"></span>
+            <span class="legend-year">${label}</span>
+            <span class="legend-unavail">${r.reason==="future" ? "未来の期間です" : "データ取得不可"}</span>
+          </div>
+        </div>`;
+    }
   });
+  const baselineNote = baseline != null
+    ? `<p class="baseline-note">平年値(表示中の${records.length}年平均): ${baseline.toFixed(1)}°C — 各年の「平年比」はここからの差です</p>`
+    : "";
 
   let chartHtml = "";
   if (available.length > 0){
@@ -442,8 +506,10 @@ function buildResultBody(records){
     const lines = buildLine("max", EMBER) + buildLine("mean", TAN) + buildLine("min", FROST);
 
     let xLabels = "";
+    const yearFontSize = n > 6 ? 8.5 : 10;
     records.forEach((r,i) => {
-      xLabels += `<text x="${xScale(i)}" y="${h-4}" text-anchor="middle" fill="${MUTED}" font-size="10" font-family="Inter">${r.year}</text>`;
+      const label = n > 6 ? `'${String(r.year).slice(2)}` : r.year;
+      xLabels += `<text x="${xScale(i)}" y="${h-4}" text-anchor="middle" fill="${MUTED}" font-size="${yearFontSize}" font-family="Inter">${label}</text>`;
     });
 
     chartHtml = `
@@ -463,6 +529,7 @@ function buildResultBody(records){
       <span class="result-date">${title}</span>
       <span class="result-sub">${sub}</span>
     </div>
+    ${baselineNote}
     <div class="legend">${legendHtml}</div>
     ${chartHtml}
   `;
@@ -497,7 +564,7 @@ async function ensureTabData(tab){
   if (dataCache[tab] !== undefined) return;
   dataCache[tab] = "loading";
   if (tab === currentTab) renderResult();
-  const years = [4,3,2,1,0].map(back => currentYear - back);
+  const years = Array.from({length: yearsBack}, (_, i) => currentYear - (yearsBack - 1 - i));
   let results;
   if (tab === "day") {
     results = await Promise.all(years.map(y => getYearRecord(y, viewMonth, selectedDay, userLoc.lat, userLoc.lon)));
